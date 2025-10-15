@@ -71,7 +71,7 @@ if __name__ == "__main__":
     print("loading data...")
     train_dataset = load_dataset(dataset, split='train')
     # Map string label -> int nếu có cột 'target' (PubMed-20k)
-    label2id = {"OBJECTIVE":0, "BACKGROUND":1, "METHODS":2, "RESULTS":3, "CONCLUSIONS":4}
+    label2id = {"BACKGROUND":0, "OBJECTIVE":1, "METHODS":2, "RESULTS":3, "CONCLUSIONS":4}
     if 'target' in train_dataset.column_names and 'label' not in train_dataset.column_names:
         train_dataset = train_dataset.map(lambda e: {"label": label2id.get(e["target"], 0)})
 
