@@ -26,16 +26,15 @@ parser.add_argument("--max_length", type=int, default=512)
 parser.add_argument("--num_workers", type=int, default=0)
 parser.add_argument("--dropout", type=float, default=0.1)
 
-
 class ClassificationDataset(torch.utils.data.Dataset):
     def __init__(self, encode_roberta, s):
         self.encode_roberta = encode_roberta
         self.s = s
 
     def __getitem__(self, idx):
+        # encode_roberta chỉ còn các cột số sau khi đã lọc
         t = {key: torch.tensor(values[idx]) for key, values in self.encode_roberta.items()}
         y = torch.FloatTensor(self.s[idx])
-
         return t, y
 
     def __len__(self):
@@ -43,22 +42,25 @@ class ClassificationDataset(torch.utils.data.Dataset):
 
 def build_loaders(encode_roberta, s, mode):
     dataset = ClassificationDataset(encode_roberta, s)
-    if args.tune_cbl_only:
-        batch_size = args.cbl_only_batch_size
-    else:
-        batch_size = args.batch_size
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, num_workers=args.num_workers,
-                                             shuffle=True if mode == "train" else False)
-    return dataloader
-
-
+    batch_size = args.cbl_only_batch_size if args.tune_cbl_only else args.batch_size
+    return torch.utils.data.DataLoader(dataset, batch_size=batch_size, num_workers=args.num_workers,
+                                       shuffle=True if mode == "train" else False)
 
 if __name__ == "__main__":
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    # (tuỳ chọn) giảm cảnh báo XLA/CUDA ồn ào, không ảnh hưởng chạy
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
     args = parser.parse_args()
 
     print("loading data...")
     train_dataset = load_dataset(args.dataset, split='train')
+
+    # Map nhãn string -> int cho PubMed-20k (an toàn: chỉ chạy khi có 'target')
+    label2id = {"OBJECTIVE":0, "BACKGROUND":1, "METHODS":2, "RESULTS":3, "CONCLUSIONS":4}
+    if 'target' in train_dataset.column_names and 'label' not in train_dataset.column_names:
+        train_dataset = train_dataset.map(lambda e: {"label": label2id.get(e["target"], 0)})
+
     if args.dataset == 'SetFit/sst2':
         val_dataset = load_dataset(args.dataset, split='validation')
     print("training data len: ", len(train_dataset))
@@ -70,13 +72,15 @@ if __name__ == "__main__":
         d_list = []
         for i in range(CFG.class_num[args.dataset]):
             d_list.append(
-                train_dataset.filter(lambda e: e['label'] == i).select(range(1000 // CFG.class_num[args.dataset])))
+                train_dataset.filter(lambda e: e['label'] == i).select(range(1000 // CFG.class_num[args.dataset]))
+            )
         train_dataset = concatenate_datasets(d_list)
         if args.dataset == 'SetFit/sst2':
             d_list = []
             for i in range(CFG.class_num[args.dataset]):
                 d_list.append(
-                    val_dataset.filter(lambda e: e['label'] == i).select(range(80 // CFG.class_num[args.dataset])))
+                    val_dataset.filter(lambda e: e['label'] == i).select(range(80 // CFG.class_num[args.dataset]))
+                )
             val_dataset = concatenate_datasets(d_list)
 
         print("training labeled data len: ", len(train_dataset))
@@ -91,27 +95,47 @@ if __name__ == "__main__":
     else:
         raise Exception("backbone should be roberta or gpt2")
 
+    # -------- Tokenize & LỌC CỘT (fix lỗi string) --------
+    text_key = CFG.example_name[args.dataset]
     encoded_train_dataset = train_dataset.map(
-        lambda e: tokenizer(e[CFG.example_name[args.dataset]], padding=True, truncation=True, max_length=args.max_length), batched=True,
-        batch_size=len(train_dataset))
-    encoded_train_dataset = encoded_train_dataset.remove_columns([CFG.example_name[args.dataset]])
-    if args.dataset == 'SetFit/sst2':
+        lambda e: tokenizer(e[text_key], padding=True, truncation=True, max_length=args.max_length),
+        batched=True, batch_size=len(train_dataset)
+    ).remove_columns([text_key])
+
+    # các cột cũ chỉ áp dụng nếu tồn tại
+    if 'label_text' in encoded_train_dataset.column_names:
         encoded_train_dataset = encoded_train_dataset.remove_columns(['label_text'])
-    if args.dataset == 'dbpedia_14':
+    if 'title' in encoded_train_dataset.column_names:
         encoded_train_dataset = encoded_train_dataset.remove_columns(['title'])
+
+    # 🔧 Chỉ giữ cột số cần thiết để tránh cột string (PubMed-20k có 'target', 'pmid', ...)
+    keep_cols = ['input_ids', 'attention_mask', 'label']
+    if 'token_type_ids' in encoded_train_dataset.column_names:
+        keep_cols.append('token_type_ids')
+    encoded_train_dataset = encoded_train_dataset.remove_columns(
+        [c for c in encoded_train_dataset.column_names if c not in keep_cols]
+    )
     encoded_train_dataset = encoded_train_dataset[:len(encoded_train_dataset)]
 
     if args.dataset == 'SetFit/sst2':
         encoded_val_dataset = val_dataset.map(
-            lambda e: tokenizer(e[CFG.example_name[args.dataset]], padding=True, truncation=True, max_length=args.max_length), batched=True,
-            batch_size=len(val_dataset))
-        encoded_val_dataset = encoded_val_dataset.remove_columns([CFG.example_name[args.dataset]])
-        if args.dataset == 'SetFit/sst2':
-            encoded_val_dataset = encoded_val_dataset.remove_columns(['label_text'])
-        if args.dataset == 'dbpedia_14':
-            encoded_val_dataset = encoded_val_dataset.remove_columns(['title'])
-        encoded_val_dataset = encoded_val_dataset[:len(encoded_val_dataset)]
+            lambda e: tokenizer(e[text_key], padding=True, truncation=True, max_length=args.max_length),
+            batched=True, batch_size=len(val_dataset)
+        ).remove_columns([text_key])
 
+        if 'label_text' in encoded_val_dataset.column_names:
+            encoded_val_dataset = encoded_val_dataset.remove_columns(['label_text'])
+        if 'title' in encoded_val_dataset.column_names:
+            encoded_val_dataset = encoded_val_dataset.remove_columns(['title'])
+
+        keep_cols_val = ['input_ids', 'attention_mask', 'label']
+        if 'token_type_ids' in encoded_val_dataset.column_names:
+            keep_cols_val.append('token_type_ids')
+        encoded_val_dataset = encoded_val_dataset.remove_columns(
+            [c for c in encoded_val_dataset.column_names if c not in keep_cols_val]
+        )
+        encoded_val_dataset = encoded_val_dataset[:len(encoded_val_dataset)]
+    # -----------------------------------------------------
 
     concept_set = CFG.concept_set[args.dataset]
     print("concept len: ", len(concept_set))
@@ -127,13 +151,10 @@ if __name__ == "__main__":
     elif args.labeling == 'llm':
         prefix += "llm_labeling"
 
-    prefix += "/"
-    prefix += d_name
-    prefix += "/"
-    train_similarity = np.load(prefix + "/concept_labels_train.npy")
+    prefix += "/" + d_name + "/"
+    train_similarity = np.load(prefix + "concept_labels_train.npy")
     if args.dataset == 'SetFit/sst2':
-        val_similarity = np.load(prefix + "/concept_labels_val.npy")
-
+        val_similarity = np.load(prefix + "concept_labels_val.npy")
 
     if args.automatic_concept_correction:
         start = time.time()
@@ -190,13 +211,12 @@ if __name__ == "__main__":
     print("start training...")
     best_loss = float('inf')
 
+    # nơi lưu model
     if args.backbone == 'roberta':
-        prefix += 'roberta_cbm'
-    elif args.backbone == 'gpt2':
-        prefix += 'gpt2_cbm'
-    prefix += "/"
-    if not os.path.exists(prefix):
-        os.makedirs(prefix)
+        save_prefix = prefix + 'roberta_cbm/'
+    else:
+        save_prefix = prefix + 'gpt2_cbm/'
+    os.makedirs(save_prefix, exist_ok=True)
 
     model_name = "cbl"
     if args.tune_cbl_only:
@@ -205,10 +225,7 @@ if __name__ == "__main__":
         model_name += "_acc"
 
     start = time.time()
-    if args.labeling == 'llm':
-        epochs = 10
-    else:
-        epochs = CFG.cbl_epochs[args.dataset]
+    epochs = 10 if args.labeling == 'llm' else CFG.cbl_epochs[args.dataset]
     for e in range(epochs):
         print("Epoch ", e+1, ":")
         if args.tune_cbl_only:
@@ -233,12 +250,13 @@ if __name__ == "__main__":
                 cbl_features = cbl(LM_features)
             else:
                 cbl_features = backbone_cbl(batch_text)
+
             loss = -cos_sim_cubed(cbl_features, batch_sim)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            print("batch ", str(i), " loss: ", loss.detach().cpu().numpy(), end="\r")
-            training_loss.append(loss.detach().cpu().numpy())
+            print("batch ", str(i), " loss: ", float(loss.detach().cpu().numpy()), end="\r")
+            training_loss.append(float(loss.detach().cpu().numpy()))
         avg_training_loss = sum(training_loss)/len(training_loss)
         print("training loss: ", avg_training_loss)
 
@@ -265,22 +283,17 @@ if __name__ == "__main__":
                     else:
                         cbl_features = backbone_cbl(batch_text)
                     loss = -cos_sim_cubed(cbl_features, batch_sim)
-                    val_loss.append(loss.detach().cpu().numpy())
+                    val_loss.append(float(loss.detach().cpu().numpy()))
             avg_val_loss = sum(val_loss)/len(val_loss)
             print("val loss: ", avg_val_loss)
             if avg_val_loss < best_loss:
                 print("save model")
                 best_loss = avg_val_loss
-                if args.tune_cbl_only:
-                    torch.save(cbl.state_dict(), prefix + model_name + ".pt")
-                else:
-                    torch.save(backbone_cbl.state_dict(), prefix + model_name + ".pt")
+                torch.save((cbl if args.tune_cbl_only else backbone_cbl).state_dict(),
+                           os.path.join(save_prefix, model_name + ".pt"))
         else:
             print("save model")
-            if args.tune_cbl_only:
-                torch.save(cbl.state_dict(), prefix + model_name + ".pt")
-            else:
-                torch.save(backbone_cbl.state_dict(), prefix + model_name + ".pt")
+            torch.save((cbl if args.tune_cbl_only else backbone_cbl).state_dict(),
+                       os.path.join(save_prefix, model_name + ".pt"))
 
-    end = time.time()
-    print("time of training CBL:", (end - start) / 3600, "hours")
+    print("time of training CBL:", (time.time() - start) / 3600, "hours")

@@ -63,6 +63,8 @@ def get_labels(n, d):
         return agnews_labels(n)
     if d == 'dbpedia_14':
         return dbpedia_labels(n)
+    if d == "Duyacquy/Pubmed-20k":
+        return pubmed_abs_labels(n)
 
     return None
 
@@ -117,3 +119,10 @@ def dbpedia_labels(n):
         return 12
     else:
         return 13
+
+def pubmed_abs_labels(n):
+    boundaries = [30, 60, 90, 120, 150]
+    for i, bound in enumerate(boundaries):
+        if n < bound:
+            return i
+    return len(boundaries)
