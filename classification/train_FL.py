@@ -48,9 +48,21 @@ if __name__ == "__main__":
 
     # ---- Parse cbl_path: acs/dataset/backbone/xxx.pt
     acs = args.cbl_path.split("/")[0]
-    dataset = args.cbl_path.split("/")[1]
-    if 'sst2' in dataset:
-        dataset = dataset.replace('_', '/')
+    raw_dataset = args.cbl_path.split("/")[1]
+
+    def normalize_dataset_name(seg: str) -> str:
+        if seg in CFG.example_name:
+            return seg
+        alt = seg.replace('_', '/')
+        if alt in CFG.example_name:
+            return alt
+        # cuối cùng, giữ nguyên (để lỗi hiện ra rõ nếu không khớp)
+        return seg
+
+    dataset = normalize_dataset_name(raw_dataset)
+
+    # if 'sst2' in dataset:
+    #     dataset = dataset.replace('_', '/')
     backbone = args.cbl_path.split("/")[2]   # 'roberta_cbm' hoặc 'gpt2_cbm'
     backbone = 'roberta' if 'roberta' in backbone else 'gpt2'
     cbl_name = args.cbl_path.split("/")[-1]  # ví dụ: cbl_no_backbone_acc.pt
