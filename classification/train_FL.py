@@ -226,7 +226,7 @@ if __name__ == "__main__":
     train_c, train_mean, train_std = normalize(train_c, d=0)
     train_c = F.relu(train_c)
 
-    prefix = "./" + acs + "/" + dataset.replace('/', '_') + "/" + backbone + "/"
+    prefix = "./" + acs + "/" + dataset.replace('/', '_') + "/" + "roberta_cbm" + "/"
     os.makedirs(prefix, exist_ok=True)
     model_name = cbl_name[3:]  # strip "cbl"
 
